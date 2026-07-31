@@ -18,17 +18,16 @@ def _required(name: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     allow_side_effects: bool
-    kafka_brokers: str
-    kafka_order_paid_topic: str
-    kafka_security_protocol: str
-    kafka_sasl_mechanism: str
-    kafka_username: str
-    kafka_password: str
+    downstream_isolated: bool
+    kubectl_path: str
+    kubeconfig_path: str
+    kube_insecure_skip_tls_verify: bool
+    kube_namespace: str
+    main_backend_resource: str
+    main_backend_container: str
     postgres_dsn: str
-    test_merchant_id: str
-    test_shop_id: str
-    test_product_id: str
-    test_category_id: str
+    test_shop_id: int
+    test_client_phone: str
     wait_timeout_seconds: float
     wait_interval_seconds: float
 
@@ -36,28 +35,32 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             allow_side_effects=_as_bool(os.getenv("FM_ALLOW_SIDE_EFFECTS")),
-            kafka_brokers=_required("FM_KAFKA_BROKERS"),
-            kafka_order_paid_topic=os.getenv(
-                "FM_KAFKA_ORDER_PAID_TOPIC", "payments.order.paid"
+            downstream_isolated=_as_bool(
+                os.getenv("FM_CONFIRM_DOWNSTREAM_ISOLATED")
+            ),
+            kubectl_path=os.getenv("FM_KUBECTL_PATH", "kubectl").strip(),
+            kubeconfig_path=_required("FM_KUBECONFIG"),
+            kube_insecure_skip_tls_verify=_as_bool(
+                os.getenv("FM_KUBE_INSECURE_SKIP_TLS_VERIFY")
+            ),
+            kube_namespace=os.getenv("FM_KUBE_NAMESPACE", "market").strip(),
+            main_backend_resource=os.getenv(
+                "FM_MAIN_BACKEND_RESOURCE",
+                "auto",
             ).strip(),
-            kafka_security_protocol=os.getenv(
-                "FM_KAFKA_SECURITY_PROTOCOL", "SASL_SSL"
+            main_backend_container=os.getenv(
+                "FM_MAIN_BACKEND_CONTAINER",
+                "service-market-core-backend-api",
             ).strip(),
-            kafka_sasl_mechanism=os.getenv(
-                "FM_KAFKA_SASL_MECHANISM", "PLAIN"
-            ).strip(),
-            kafka_username=os.getenv("FM_KAFKA_USERNAME", "").strip(),
-            kafka_password=os.getenv("FM_KAFKA_PASSWORD", "").strip(),
             postgres_dsn=_required("FM_POSTGRES_DSN"),
-            test_merchant_id=_required("FM_TEST_MERCHANT_ID"),
-            test_shop_id=_required("FM_TEST_SHOP_ID"),
-            test_product_id=_required("FM_TEST_PRODUCT_ID"),
-            test_category_id=_required("FM_TEST_CATEGORY_ID"),
+            test_shop_id=int(_required("FM_TEST_SHOP_ID")),
+            test_client_phone=_required("FM_TEST_CLIENT_PHONE").removeprefix(
+                "+"
+            ),
             wait_timeout_seconds=float(
-                os.getenv("FM_WAIT_TIMEOUT_SECONDS", "60")
+                os.getenv("FM_WAIT_TIMEOUT_SECONDS", "120")
             ),
             wait_interval_seconds=float(
                 os.getenv("FM_WAIT_INTERVAL_SECONDS", "2")
             ),
         )
-

@@ -4,59 +4,51 @@ from decimal import Decimal
 
 import pytest
 
-from finance_autotests.events import build_order_paid
 from finance_autotests.polling import wait_for
 
 
 @pytest.mark.external
 @pytest.mark.smoke
-def test_order_paid_creates_job_and_snapshot(
+def test_real_mbank_payment_reaches_finance_module(
     settings,
-    kafka,
+    main_backend,
     finance_db,
 ) -> None:
-    data = build_order_paid(
-        merchant_id=settings.test_merchant_id,
+    fixture = main_backend.create_mbank_order(
         shop_id=settings.test_shop_id,
-        product_id=settings.test_product_id,
-        category_id=settings.test_category_id,
-        item_total=Decimal("1000.00"),
-    )
-
-    kafka.publish_json(
-        topic=settings.kafka_order_paid_topic,
-        key=data.order_id,
-        payload=data.event,
+        client_phone=settings.test_client_phone,
     )
 
     job = wait_for(
-        lambda: finance_db.payment_job(data.payment_id),
+        lambda: finance_db.payment_job(fixture.payment_id),
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
-        description=f"payment_job для {data.payment_id}",
+        description=f"payment_job для {fixture.payment_id}",
     )
     snapshot = wait_for(
-        lambda: finance_db.snapshot(data.payment_id),
+        lambda: finance_db.snapshot(fixture.payment_id),
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
-        description=f"snapshot для {data.payment_id}",
+        description=f"snapshot для {fixture.payment_id}",
     )
     items = wait_for(
-        lambda: finance_db.snapshot_items(data.payment_id) or None,
+        lambda: finance_db.snapshot_items(fixture.payment_id) or None,
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
-        description=f"snapshot items для {data.payment_id}",
+        description=f"snapshot items для {fixture.payment_id}",
     )
 
-    assert job["order_id"] == data.order_id
-    assert job["payment_id"] == data.payment_id
-    assert finance_db.amount(job["amount"]) == data.expected_amount
+    assert job["order_id"] == fixture.order_id
+    assert job["payment_id"] == fixture.payment_id
+    assert finance_db.amount(job["amount"]) == Decimal(fixture.total_amount)
 
-    assert snapshot["order_id"] == data.order_id
-    assert finance_db.amount(snapshot["total_amount"]) == data.expected_amount
+    assert snapshot["order_id"] == fixture.order_id
+    assert finance_db.amount(snapshot["total_amount"]) == Decimal(
+        fixture.total_amount
+    )
 
     assert len(items) == 1
-    assert items[0]["order_item_id"] == data.order_item_id
-    assert items[0]["merchant_id"] == settings.test_merchant_id
-    assert finance_db.amount(items[0]["item_total"]) == data.expected_amount
-
+    assert items[0]["order_item_id"] == fixture.order_item_id
+    assert items[0]["merchant_id"] == fixture.merchant_id
+    assert items[0]["product_id"] == fixture.product_id
+    assert items[0]["category_id"] == fixture.category_id
