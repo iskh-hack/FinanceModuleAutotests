@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
+import time
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -47,6 +49,106 @@ class MainBackendFixtureFactory:
         client_phone: str,
     ) -> MbankOrderFixture:
         run_id = f"qa-smoke-{uuid4().hex[:16]}"
+        stdout = self._run_shell(
+            self._fixture_code(
+                run_id=run_id,
+                shop_id=shop_id,
+                client_phone=client_phone,
+            )
+        )
+        return MbankOrderFixture(**self._parse_result(stdout))
+
+    def complete_order(self, order_id: str) -> None:
+        if not order_id.isdigit():
+            raise ValueError("order_id должен быть числовым")
+        code = f"""
+from django.utils import timezone
+from apps.order.choices import OrderStatusChoices, OrderStatusHistorySourceChoices
+from apps.order.models import Order
+
+order_id = {int(order_id)!r}
+updated = Order.objects.filter(id=order_id, is_test=True).update(
+    status=OrderStatusChoices.STATUS_COLLECT,
+    is_paid=True,
+)
+if updated != 1:
+    raise RuntimeError("Тестовый Order не найден")
+Order.objects.filter(id=order_id).update(
+    status=OrderStatusChoices.STATUS_DELIVERED,
+    delivery_time=timezone.now(),
+    status_history_source=OrderStatusHistorySourceChoices.SYSTEM,
+    status_history_user_id=None,
+)
+print("{RESULT_MARKER}completed")
+"""
+        stdout = self._run_shell(code)
+        if RESULT_MARKER + "completed" not in stdout:
+            raise RuntimeError("Main Backend не подтвердил завершение Order")
+
+    def _run_shell(self, code: str, timeout: float = 180) -> str:
+        # Rancher proxy обрывает долгий kubectl exec примерно через 30 секунд.
+        # Запускаем Django shell в pod асинхронно и опрашиваем короткими exec.
+        execution_id = f"fm-autotest-{uuid4().hex}"
+        prefix = f"/tmp/{execution_id}"
+        encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+        launch = (
+            f"if mkdir {prefix}.lock 2>/dev/null; then "
+            f"echo {encoded} | base64 -d > {prefix}.py; "
+            f"nohup sh -c 'python manage.py shell -c \"$(cat {prefix}.py)\" "
+            f"> {prefix}.out 2>&1; echo $? > {prefix}.exit' "
+            "> /dev/null 2>&1 < /dev/null & fi"
+        )
+        resource = self._resolve_resource()
+        launch_error = ""
+        for _ in range(5):
+            result = self._exec(resource, ["sh", "-c", launch])
+            if result.returncode == 0:
+                break
+            launch_error = (result.stderr or result.stdout).strip()
+            started = self._exec(resource, ["test", "-d", f"{prefix}.lock"])
+            if started.returncode == 0:
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError(launch_error[-8000:])
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            poll = self._exec(
+                resource,
+                ["sh", "-c", f"test -f {prefix}.exit && cat {prefix}.exit"],
+            )
+            if poll.returncode == 0 and poll.stdout.strip():
+                output = self._read_remote_file(resource, f"{prefix}.out")
+                self._exec(
+                    resource,
+                    [
+                        "sh",
+                        "-c",
+                        f"rm -f {prefix}.py {prefix}.out {prefix}.exit; "
+                        f"rmdir {prefix}.lock",
+                    ],
+                )
+                if poll.stdout.strip() != "0":
+                    raise RuntimeError(
+                        "Main Backend fixture завершилась с ошибкой:\n"
+                        + (output.stdout or output.stderr).strip()[-8000:]
+                    )
+                return output.stdout
+            time.sleep(2)
+        raise TimeoutError("Main Backend fixture не завершилась за 180 секунд")
+
+    def _read_remote_file(self, resource: str, path: str):
+        last_result = None
+        for _ in range(5):
+            last_result = self._exec(resource, ["cat", path])
+            if last_result.returncode == 0:
+                return last_result
+            time.sleep(2)
+        details = (last_result.stderr or last_result.stdout).strip()
+        raise RuntimeError("Не удалось прочитать результат из pod:\n" + details[-8000:])
+
+    def _exec(self, resource: str, remote_command: list[str]):
         command = [
             self._kubectl_path,
             "--kubeconfig",
@@ -59,35 +161,29 @@ class MainBackendFixtureFactory:
                 "-n",
                 self._namespace,
                 "exec",
-                self._resolve_resource(),
+                resource,
                 "-c",
                 self._container,
                 "--",
-                "python",
-                "manage.py",
-                "shell",
-                "-c",
-                self._fixture_code(
-                    run_id=run_id,
-                    shop_id=shop_id,
-                    client_phone=client_phone,
-                ),
+                *remote_command,
             ]
         )
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-        if result.returncode != 0:
-            details = (result.stderr or result.stdout).strip()
-            raise RuntimeError(
-                "Main Backend fixture завершилась с ошибкой:\n"
-                + details[-8000:]
+        try:
+            return subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=25,
             )
-        return MbankOrderFixture(**self._parse_result(result.stdout))
+        except subprocess.TimeoutExpired as error:
+            return subprocess.CompletedProcess(
+                command,
+                124,
+                stdout=error.stdout or "",
+                stderr="kubectl exec не ответил за 25 секунд",
+            )
 
     def _resolve_resource(self) -> str:
         if self._resource != "auto":
@@ -107,6 +203,7 @@ class MainBackendFixtureFactory:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            timeout=30,
         )
         if result.returncode != 0:
             raise RuntimeError(

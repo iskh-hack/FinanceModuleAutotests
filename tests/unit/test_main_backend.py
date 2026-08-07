@@ -39,3 +39,17 @@ def test_fixture_code_requires_test_shop_and_customer() -> None:
 
     assert "user_type=User.TYPE_CUSTOMER" in code
     assert "if not shop.is_test:" in code
+
+
+def test_complete_order_rejects_non_numeric_id() -> None:
+    factory = MainBackendFixtureFactory(
+        kubectl_path="kubectl",
+        kubeconfig_path="config",
+        namespace="market",
+        resource="auto",
+        container="main-backend",
+        insecure_skip_tls_verify=False,
+    )
+
+    with pytest.raises(ValueError):
+        factory.complete_order("not-an-order-id")

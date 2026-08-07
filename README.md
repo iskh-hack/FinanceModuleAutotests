@@ -66,6 +66,36 @@ Unit-тесты не обращаются к кластеру и не созда
 pytest tests/unit -v
 ```
 
+## Локальный E2E Finance Module
+
+Тест работает только с локальным Docker-окружением. Он самостоятельно:
+
+- публикует `merchant.created` и ждёт создания счетов мерчанта в BLNK;
+- публикует `order.paid` и ждёт `CREDITED`;
+- проверяет `payment_job`, snapshot, item и CREDIT-проводку;
+- публикует `order.completed` и ждёт `SPLIT_COMPLETED`.
+
+Бизнес-записи напрямую в PostgreSQL тест не создаёт. База используется в
+read-only режиме только для проверок результата.
+
+```powershell
+cd C:\QA\FinanceModuleAutotests
+$env:FM_LOCAL_E2E = "true"
+.\.venv\Scripts\python.exe -m pytest tests/local -v -s
+```
+
+Значения по умолчанию:
+
+```text
+Kafka:     localhost:9092
+PostgreSQL: postgresql://user:user@localhost:5434/fin_module
+Timeout:   90 секунд
+```
+
+При необходимости их можно изменить переменными
+`FM_LOCAL_KAFKA`, `FM_LOCAL_POSTGRES_DSN`,
+`FM_LOCAL_WAIT_TIMEOUT_SECONDS` и `FM_LOCAL_WAIT_INTERVAL_SECONDS`.
+
 ## Внешний smoke
 
 Перед запуском требуется:

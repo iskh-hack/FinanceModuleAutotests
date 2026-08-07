@@ -14,6 +14,11 @@ def test_real_mbank_payment_reaches_finance_module(
     main_backend,
     finance_db,
 ) -> None:
+    assert not finance_db.server_is_read_only(), (
+        "Finance Module подключён к PostgreSQL в режиме read-only; "
+        "создание payment_job и обработка outbox невозможны"
+    )
+
     fixture = main_backend.create_mbank_order(
         shop_id=settings.test_shop_id,
         client_phone=settings.test_client_phone,
@@ -52,3 +57,60 @@ def test_real_mbank_payment_reaches_finance_module(
     assert items[0]["merchant_id"] == fixture.merchant_id
     assert items[0]["product_id"] == fixture.product_id
     assert items[0]["category_id"] == fixture.category_id
+
+    credited_job = wait_for(
+        lambda: _terminal_payment_job(
+            finance_db, fixture.payment_id, {"CREDITED", "FAILED"}
+        ),
+        timeout=settings.wait_timeout_seconds,
+        interval=settings.wait_interval_seconds,
+        description=f"CREDIT для {fixture.payment_id}",
+    )
+    assert credited_job["status"] == "CREDITED", credited_job["last_error"]
+
+    credit_monitoring = wait_for(
+        lambda: _completed_monitoring(
+            finance_db, fixture.payment_id, "CREDIT"
+        ),
+        timeout=settings.wait_timeout_seconds,
+        interval=settings.wait_interval_seconds,
+        description=f"CREDIT monitoring для {fixture.payment_id}",
+    )
+    assert all(row["blnk_status"] == "APPLIED" for row in credit_monitoring)
+
+    main_backend.complete_order(fixture.order_id)
+
+    split_job = wait_for(
+        lambda: _terminal_payment_job(
+            finance_db,
+            fixture.payment_id,
+            {"SPLIT_COMPLETED", "FAILED"},
+        ),
+        timeout=settings.wait_timeout_seconds,
+        interval=settings.wait_interval_seconds,
+        description=f"SPLIT для {fixture.payment_id}",
+    )
+    assert split_job["status"] == "SPLIT_COMPLETED", split_job["last_error"]
+
+    split_monitoring = wait_for(
+        lambda: _completed_monitoring(
+            finance_db, fixture.payment_id, "SPLIT"
+        ),
+        timeout=settings.wait_timeout_seconds,
+        interval=settings.wait_interval_seconds,
+        description=f"SPLIT monitoring для {fixture.payment_id}",
+    )
+    assert all(row["blnk_status"] == "APPLIED" for row in split_monitoring)
+
+
+def _terminal_payment_job(finance_db, payment_id: str, statuses: set[str]):
+    job = finance_db.payment_job(payment_id)
+    return job if job and job["status"] in statuses else None
+
+
+def _completed_monitoring(finance_db, payment_id: str, operation_type: str):
+    rows = finance_db.monitoring_jobs(payment_id, operation_type)
+    if not rows:
+        return None
+    terminal = {"COMPLETED", "FAILED"}
+    return rows if all(row["status"] in terminal for row in rows) else None
