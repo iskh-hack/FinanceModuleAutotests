@@ -77,6 +77,23 @@ class FinanceDatabase:
             (payment_id,),
         )
 
+    def payment_job_count(self, payment_id: str) -> int:
+        row = self._one(
+            "SELECT COUNT(*) AS count FROM payment_jobs WHERE payment_id = %s",
+            (payment_id,),
+        )
+        return int(row["count"]) if row else 0
+
+    def completion_intent(self, order_id: str) -> dict[str, Any] | None:
+        return self._one(
+            """
+            SELECT order_id, event_type, processed, processed_at
+            FROM order_completion_intents
+            WHERE order_id = %s
+            """,
+            (order_id,),
+        )
+
     def snapshot(self, payment_id: str) -> dict[str, Any] | None:
         return self._one(
             """
@@ -112,6 +129,17 @@ class FinanceDatabase:
             """,
             (payment_id,),
         )
+
+    def order_transaction_count(self, payment_id: str, transaction_type: str) -> int:
+        row = self._one(
+            """
+            SELECT COUNT(*) AS count
+            FROM order_transactions
+            WHERE payment_id = %s AND transaction_type = %s
+            """,
+            (payment_id, transaction_type),
+        )
+        return int(row["count"]) if row else 0
 
     def monitoring_jobs(
         self,
