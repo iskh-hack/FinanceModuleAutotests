@@ -69,6 +69,7 @@ class FinanceDatabase:
             """
             SELECT
                 id, order_id, payment_id, amount, currency,
+                payment_method, installment_months,
                 status, progress, retry_count, last_error,
                 credit_txn_id, credited_at, split_at
             FROM payment_jobs

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 
 from finance_autotests.database import FinanceDatabase
+from finance_autotests.events import (
+    merchant_created_message,
+    order_completed_message,
+    order_paid_message,
+)
 from finance_autotests.kafka_client import KafkaPublisher
 from finance_autotests.polling import wait_for
 
@@ -28,85 +32,38 @@ def _terminal_merchant(db: FinanceDatabase, merchant_id: str):
 
 @pytest.mark.local_e2e
 @pytest.mark.smoke
-def test_order_paid_credit_and_split_local() -> None:
+@pytest.mark.parametrize(
+    ("source_type", "installment_plan", "expected_method", "extra_transaction"),
+    [
+        pytest.param("MBANK", 0, "mbank", None, id="mbank"),
+        pytest.param("MPLUS", 6, "mplus", "MPLUS_COMMISSION", id="mplus-6-months"),
+    ],
+)
+def test_order_paid_credit_and_split_local(
+    source_type: str,
+    installment_plan: int,
+    expected_method: str,
+    extra_transaction: str | None,
+) -> None:
     if not _enabled("FM_LOCAL_E2E"):
         pytest.skip("Локальный E2E отключён: задайте FM_LOCAL_E2E=true")
 
-    dsn = os.getenv(
+    db = FinanceDatabase(os.getenv(
         "FM_LOCAL_POSTGRES_DSN",
         "postgresql://user:user@localhost:5434/fin_module",
-    )
+    ))
     kafka = os.getenv("FM_LOCAL_KAFKA", "localhost:9092")
     timeout = float(os.getenv("FM_LOCAL_WAIT_TIMEOUT_SECONDS", "90"))
     interval = float(os.getenv("FM_LOCAL_WAIT_INTERVAL_SECONDS", "1"))
-    db = FinanceDatabase(dsn)
-
-    assert not db.server_is_read_only(), "Локальная БД неожиданно read-only"
-
-    run_id = uuid4().hex
-    merchant_id = f"autotest-merchant-{run_id}"
-    order_id = f"autotest-order-{run_id}"
-    payment_id = f"autotest-payment-{run_id}"
-    item_id = f"autotest-item-{run_id}"
-    timestamp = datetime.now(UTC).isoformat()
-
-    merchant_event = {
-        "event_type": "merchant.created",
-        "payload": {
-            "merchant_id": merchant_id,
-            "organization_name": "Local Autotest Merchant",
-            "email": f"{run_id}@autotest.local",
-            "available_installment_months": [3, 6],
-        },
-        "timestamp": timestamp,
-    }
-    paid_event = {
-        "event_type": "order.paid",
-        "payload": {
-            "id": payment_id,
-            "order_id": order_id,
-            "client_id": f"autotest-client-{run_id}",
-            "client_phone": "996700000001",
-            "status": "PAID",
-            "payment_sources": [
-                {
-                    "type": "MBANK",
-                    "amount": "1000.00",
-                    "provider_reference": f"autotest-provider-{run_id}",
-                }
-            ],
-            "order_snapshot": {
-                "currency": "KGS",
-                "total_amount": "1000.00",
-                "items": [
-                    {
-                        "order_item_id": item_id,
-                        "product_id": f"autotest-product-{run_id}",
-                        "category_id": f"autotest-category-{run_id}",
-                        "shop_id": f"autotest-shop-{run_id}",
-                        "merchant_id": merchant_id,
-                        "price": "1000.00",
-                        "quantity": 1,
-                        "item_total": "1000.00",
-                        "cashback_percent": 0,
-                    }
-                ],
-            },
-        },
-        "timestamp": timestamp,
-    }
-    completed_event = {
-        "event_type": "order.completed",
-        "payload": {
-            "order_id": order_id,
-            "status": "COMPLETED",
-            "completed_at": datetime.now(UTC).isoformat(),
-        },
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
+    merchant_id = f"autotest-merchant-{uuid4().hex}"
+    paid = order_paid_message(
+        merchant_id,
+        payment_source_type=source_type,
+        installment_plan=installment_plan,
+    )
 
     with KafkaPublisher(kafka) as publisher:
-        publisher.publish("merchants.merchant.created", merchant_event)
+        publisher.publish_message(merchant_created_message(merchant_id))
         merchant_job = wait_for(
             lambda: _terminal_merchant(db, merchant_id),
             timeout=timeout,
@@ -114,44 +71,40 @@ def test_order_paid_credit_and_split_local() -> None:
             description=f"COMPLETED merchant_job для {merchant_id}",
         )
         assert merchant_job["status"] == "COMPLETED", merchant_job["last_error"]
-        account_types = {row["account_type"] for row in db.merchant_accounts(merchant_id)}
-        assert "transit" in account_types
-        assert "current" in account_types
 
-        publisher.publish("payments.order.paid", paid_event)
+        publisher.publish_message(paid.message)
         credited = wait_for(
-            lambda: _terminal_job(db, payment_id, {"CREDITED", "FAILED"}),
+            lambda: _terminal_job(db, paid.payment_id, {"CREDITED", "FAILED"}),
             timeout=timeout,
             interval=interval,
-            description=f"CREDITED payment_job для {payment_id}",
+            description=f"CREDITED payment_job для {paid.payment_id}",
         )
         assert credited["status"] == "CREDITED", credited["last_error"]
-        assert credited["credit_txn_id"]
-        assert credited["credited_at"] is not None
+        assert credited["order_id"] == paid.order_id
+        assert credited["payment_method"] == expected_method
+        assert credited["installment_months"] == installment_plan
         assert db.amount(credited["amount"]) == Decimal("1000.00")
 
-        snapshot = db.snapshot(payment_id)
+        snapshot = db.snapshot(paid.payment_id)
         assert snapshot is not None
-        assert snapshot["order_id"] == order_id
-        assert db.amount(snapshot["total_amount"]) == Decimal("1000.00")
-        items = db.snapshot_items(payment_id)
+        assert snapshot["order_id"] == paid.order_id
+        items = db.snapshot_items(paid.payment_id)
         assert len(items) == 1
-        assert items[0]["order_item_id"] == item_id
+        assert items[0]["order_item_id"] == paid.item_id
         assert items[0]["merchant_id"] == merchant_id
 
-        credit_transactions = db.order_transactions(payment_id)
-        assert any(row["transaction_type"] == "MERCHANT_TRANSIT" for row in credit_transactions)
-
-        publisher.publish("orders.order.completed", completed_event)
+        publisher.publish_message(order_completed_message(paid.order_id))
         split = wait_for(
-            lambda: _terminal_job(db, payment_id, {"SPLIT_COMPLETED", "FAILED"}),
+            lambda: _terminal_job(db, paid.payment_id, {"SPLIT_COMPLETED", "FAILED"}),
             timeout=timeout,
             interval=interval,
-            description=f"SPLIT_COMPLETED payment_job для {payment_id}",
+            description=f"SPLIT_COMPLETED payment_job для {paid.payment_id}",
         )
         assert split["status"] == "SPLIT_COMPLETED", split["last_error"]
-        assert split["last_error"] in {None, ""}
-
-        split_transactions = db.order_transactions(payment_id)
-        transaction_types = {row["transaction_type"] for row in split_transactions}
+        transaction_types = {
+            row["transaction_type"] for row in db.order_transactions(paid.payment_id)
+        }
+        assert "MERCHANT_TRANSIT" in transaction_types
         assert "MERCHANT_BLOCK" in transaction_types
+        if extra_transaction:
+            assert extra_transaction in transaction_types

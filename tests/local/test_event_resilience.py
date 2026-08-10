@@ -28,7 +28,7 @@ def _merchant_ready(db: FinanceDatabase, merchant_id: str):
 
 def _events(merchant_id: str) -> tuple[str, str, dict, dict]:
     run_id = uuid4().hex
-    order_id = f"resilience-order-{run_id}"
+    order_id = str(100_000_000 + uuid4().int % 900_000_000)
     payment_id = f"resilience-payment-{run_id}"
     timestamp = datetime.now(UTC).isoformat()
     paid = {
@@ -39,6 +39,7 @@ def _events(merchant_id: str) -> tuple[str, str, dict, dict]:
             "client_id": f"resilience-client-{run_id}",
             "client_phone": "996700000001",
             "status": "PAID",
+            "installment_plan": 0,
             "payment_sources": [{
                 "type": "MBANK",
                 "amount": "1000.00",
@@ -47,6 +48,8 @@ def _events(merchant_id: str) -> tuple[str, str, dict, dict]:
             "order_snapshot": {
                 "currency": "KGS",
                 "total_amount": "1000.00",
+                "delivery": None,
+                "certificate": None,
                 "items": [{
                     "order_item_id": f"resilience-item-{run_id}",
                     "product_id": f"resilience-product-{run_id}",
@@ -97,7 +100,7 @@ def local_flow():
         },
         "timestamp": datetime.now(UTC).isoformat(),
     }
-    publisher.publish("merchants.merchant.created", event)
+    publisher.publish("merchants.merchant.created", event, key=merchant_id)
     job = wait_for(
         lambda: _merchant_ready(db, merchant_id),
         timeout=timeout,
@@ -114,8 +117,8 @@ def test_duplicate_order_paid_is_idempotent(local_flow) -> None:
     db, publisher, merchant_id, timeout, interval = local_flow
     _, payment_id, paid, _ = _events(merchant_id)
 
-    publisher.publish("payments.order.paid", paid)
-    publisher.publish("payments.order.paid", paid)
+    publisher.publish("payments.order.paid", paid, key=paid["payload"]["order_id"])
+    publisher.publish("payments.order.paid", paid, key=paid["payload"]["order_id"])
     job = wait_for(
         lambda: _terminal_job(db, payment_id, {"CREDITED", "FAILED"}),
         timeout=timeout,
@@ -133,7 +136,7 @@ def test_duplicate_order_completed_is_idempotent(local_flow) -> None:
     db, publisher, merchant_id, timeout, interval = local_flow
     _, payment_id, paid, completed = _events(merchant_id)
 
-    publisher.publish("payments.order.paid", paid)
+    publisher.publish("payments.order.paid", paid, key=paid["payload"]["order_id"])
     credited = wait_for(
         lambda: _terminal_job(db, payment_id, {"CREDITED", "FAILED"}),
         timeout=timeout,
@@ -141,8 +144,8 @@ def test_duplicate_order_completed_is_idempotent(local_flow) -> None:
         description=f"CREDITED payment_job для {payment_id}",
     )
     assert credited["status"] == "CREDITED", credited["last_error"]
-    publisher.publish("orders.order.completed", completed)
-    publisher.publish("orders.order.completed", completed)
+    publisher.publish("orders.order.completed", completed, key=completed["payload"]["order_id"])
+    publisher.publish("orders.order.completed", completed, key=completed["payload"]["order_id"])
     split = wait_for(
         lambda: _terminal_job(db, payment_id, {"SPLIT_COMPLETED", "FAILED"}),
         timeout=timeout,
@@ -161,7 +164,7 @@ def test_order_completed_before_order_paid_is_deferred(local_flow) -> None:
     db, publisher, merchant_id, timeout, interval = local_flow
     order_id, payment_id, paid, completed = _events(merchant_id)
 
-    publisher.publish("orders.order.completed", completed)
+    publisher.publish("orders.order.completed", completed, key=order_id)
     intent = wait_for(
         lambda: db.completion_intent(order_id),
         timeout=timeout,
@@ -170,7 +173,7 @@ def test_order_completed_before_order_paid_is_deferred(local_flow) -> None:
     )
     assert intent["processed"] is False
 
-    publisher.publish("payments.order.paid", paid)
+    publisher.publish("payments.order.paid", paid, key=order_id)
     split = wait_for(
         lambda: _terminal_job(db, payment_id, {"SPLIT_COMPLETED", "FAILED"}),
         timeout=timeout,
