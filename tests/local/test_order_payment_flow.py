@@ -33,17 +33,37 @@ def _terminal_merchant(db: FinanceDatabase, merchant_id: str):
 @pytest.mark.local_e2e
 @pytest.mark.smoke
 @pytest.mark.parametrize(
-    ("source_type", "installment_plan", "expected_method", "extra_transaction"),
+    (
+        "source_type",
+        "installment_plan",
+        "expected_method",
+        "source_account",
+        "amount",
+        "extra_transaction",
+        "extra_transaction_amount",
+    ),
     [
-        pytest.param("MBANK", 0, "mbank", None, id="mbank"),
-        pytest.param("MPLUS", 6, "mplus", "MPLUS_COMMISSION", id="mplus-6-months"),
+        pytest.param("MBANK", 0, "mbank", "@mbank_deposit", "1000.00", None, None, id="mbank"),
+        pytest.param("OTP", 0, "mbank_pay", "@mbank_pay_deposit", "1000.00", None, None, id="otp"),
+        pytest.param("PAYLER", 0, "payler", "@payler_deposit", "1000.00", None, None, id="payler"),
+        pytest.param(
+            "MPLUS", 6, "mplus", "@mplus_deposit", "1000.00",
+            "MPLUS_COMMISSION", "55.00", id="mplus-6-months",
+        ),
+        pytest.param(
+            "ADAL", 4, "adal", "@adal_deposit", "235.00",
+            "ADAL_COMMISSION", "9.40", id="adal-4-months-rounding",
+        ),
     ],
 )
 def test_order_paid_credit_and_split_local(
     source_type: str,
     installment_plan: int,
     expected_method: str,
+    source_account: str,
+    amount: str,
     extra_transaction: str | None,
+    extra_transaction_amount: str | None,
 ) -> None:
     if not _enabled("FM_LOCAL_E2E"):
         pytest.skip("Локальный E2E отключён: задайте FM_LOCAL_E2E=true")
@@ -60,6 +80,7 @@ def test_order_paid_credit_and_split_local(
         merchant_id,
         payment_source_type=source_type,
         installment_plan=installment_plan,
+        amount=amount,
     )
 
     with KafkaPublisher(kafka) as publisher:
@@ -83,7 +104,7 @@ def test_order_paid_credit_and_split_local(
         assert credited["order_id"] == paid.order_id
         assert credited["payment_method"] == expected_method
         assert credited["installment_months"] == installment_plan
-        assert db.amount(credited["amount"]) == Decimal("1000.00")
+        assert db.amount(credited["amount"]) == Decimal(amount)
 
         snapshot = db.snapshot(paid.payment_id)
         assert snapshot is not None
@@ -101,10 +122,21 @@ def test_order_paid_credit_and_split_local(
             description=f"SPLIT_COMPLETED payment_job для {paid.payment_id}",
         )
         assert split["status"] == "SPLIT_COMPLETED", split["last_error"]
-        transaction_types = {
-            row["transaction_type"] for row in db.order_transactions(paid.payment_id)
-        }
+        transactions = db.order_transactions(paid.payment_id)
+        transaction_types = {row["transaction_type"] for row in transactions}
         assert "MERCHANT_TRANSIT" in transaction_types
         assert "MERCHANT_BLOCK" in transaction_types
+        transit = next(
+            row for row in transactions if row["transaction_type"] == "MERCHANT_TRANSIT"
+        )
+        assert transit["metadata"]["payment_method"] == expected_method
+        assert transit["metadata"]["funding_sources"][0]["source_account"] == source_account
         if extra_transaction:
             assert extra_transaction in transaction_types
+            provider_commission = next(
+                row for row in transactions
+                if row["transaction_type"] == extra_transaction
+            )
+            assert db.amount(provider_commission["amount"]) == Decimal(
+                extra_transaction_amount
+            )

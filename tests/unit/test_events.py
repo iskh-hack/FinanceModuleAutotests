@@ -23,6 +23,19 @@ def test_mplus_contract_contains_installment_plan() -> None:
     assert paid.message.value["payload"]["payment_sources"][0]["type"] == "MPLUS"
 
 
+def test_adal_contract_uses_fixed_four_month_plan() -> None:
+    paid = order_paid_message(
+        "merchant-1",
+        payment_source_type="ADAL",
+        installment_plan=4,
+        amount="235.00",
+    )
+
+    assert paid.message.value["payload"]["installment_plan"] == 4
+    assert paid.message.value["payload"]["payment_sources"][0]["type"] == "ADAL"
+    assert paid.message.value["payload"]["order_snapshot"]["total_amount"] == "235.00"
+
+
 def test_order_completed_uses_order_id_as_kafka_key() -> None:
     completed = order_completed_message("123456789")
 
