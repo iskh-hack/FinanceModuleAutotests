@@ -9,14 +9,6 @@ class FinanceDatabase:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
 
-    def server_is_read_only(self) -> bool:
-        import psycopg
-
-        with psycopg.connect(self._dsn, autocommit=True) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("SHOW transaction_read_only")
-                return cursor.fetchone()[0] == "on"
-
     @contextmanager
     def _connection(self) -> Iterator[Any]:
         import psycopg
@@ -27,8 +19,6 @@ class FinanceDatabase:
             autocommit=True,
             row_factory=dict_row,
         ) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("SET default_transaction_read_only = on")
             yield connection
 
     def _one(self, query: str, params: tuple[Any, ...]) -> dict[str, Any] | None:

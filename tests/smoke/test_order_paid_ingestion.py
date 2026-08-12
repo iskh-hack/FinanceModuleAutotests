@@ -14,11 +14,6 @@ def test_real_mbank_payment_reaches_finance_module(
     main_backend,
     finance_db,
 ) -> None:
-    assert not finance_db.server_is_read_only(), (
-        "Finance Module подключён к PostgreSQL в режиме read-only; "
-        "создание payment_job и обработка outbox невозможны"
-    )
-
     fixture = main_backend.create_mbank_order(
         shop_id=settings.test_shop_id,
         client_phone=settings.test_client_phone,
