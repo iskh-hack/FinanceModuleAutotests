@@ -3,8 +3,12 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+import psycopg
 
 from finance_autotests.polling import wait_for
+
+
+DB_TRANSIENT_ERRORS = (psycopg.OperationalError,)
 
 
 @pytest.mark.external
@@ -24,18 +28,21 @@ def test_real_mbank_payment_reaches_finance_module(
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
         description=f"payment_job для {fixture.payment_id}",
+        retry_exceptions=DB_TRANSIENT_ERRORS,
     )
     snapshot = wait_for(
         lambda: finance_db.snapshot(fixture.payment_id),
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
         description=f"snapshot для {fixture.payment_id}",
+        retry_exceptions=DB_TRANSIENT_ERRORS,
     )
     items = wait_for(
         lambda: finance_db.snapshot_items(fixture.payment_id) or None,
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
         description=f"snapshot items для {fixture.payment_id}",
+        retry_exceptions=DB_TRANSIENT_ERRORS,
     )
 
     assert job["order_id"] == fixture.order_id
@@ -60,6 +67,7 @@ def test_real_mbank_payment_reaches_finance_module(
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
         description=f"CREDIT для {fixture.payment_id}",
+        retry_exceptions=DB_TRANSIENT_ERRORS,
     )
     assert credited_job["status"] == "CREDITED", credited_job["last_error"]
 
@@ -70,6 +78,7 @@ def test_real_mbank_payment_reaches_finance_module(
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
         description=f"CREDIT monitoring для {fixture.payment_id}",
+        retry_exceptions=DB_TRANSIENT_ERRORS,
     )
     assert all(row["blnk_status"] == "APPLIED" for row in credit_monitoring)
 
@@ -84,6 +93,7 @@ def test_real_mbank_payment_reaches_finance_module(
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
         description=f"SPLIT для {fixture.payment_id}",
+        retry_exceptions=DB_TRANSIENT_ERRORS,
     )
     assert split_job["status"] == "SPLIT_COMPLETED", split_job["last_error"]
 
@@ -94,6 +104,7 @@ def test_real_mbank_payment_reaches_finance_module(
         timeout=settings.wait_timeout_seconds,
         interval=settings.wait_interval_seconds,
         description=f"SPLIT monitoring для {fixture.payment_id}",
+        retry_exceptions=DB_TRANSIENT_ERRORS,
     )
     assert all(row["blnk_status"] == "APPLIED" for row in split_monitoring)
 

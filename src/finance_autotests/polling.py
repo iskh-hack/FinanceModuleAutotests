@@ -13,17 +13,28 @@ def wait_for(
     timeout: float,
     interval: float,
     description: str,
+    retry_exceptions: tuple[type[Exception], ...] = (),
 ) -> T:
     deadline = time.monotonic() + timeout
     last_value: T | None = None
+    last_error: Exception | None = None
 
     while True:
-        last_value = operation()
+        try:
+            last_value = operation()
+            last_error = None
+        except retry_exceptions as error:
+            last_error = error
         if last_value is not None:
             return last_value
         if time.monotonic() >= deadline:
+            details = (
+                f" Последняя временная ошибка: {last_error!r}"
+                if last_error is not None
+                else ""
+            )
             raise TimeoutError(
-                f"Не дождались: {description}. Последнее значение: {last_value!r}"
+                f"Не дождались: {description}. Последнее значение: "
+                f"{last_value!r}.{details}"
             )
         time.sleep(interval)
-
