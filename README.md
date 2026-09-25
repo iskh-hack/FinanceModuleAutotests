@@ -1,129 +1,129 @@
-# Автотесты Finance Module
+# Функциональные автотесты Finance Module
 
-Проект проверяет основной финансовый поток на развёрнутом QA-окружении:
+Тесты проверяют интеграцию Core Backend, Debezium, Finance Module и BLNK на dev.
+База Finance Module используется только для фиксированных `SELECT`-проверок.
 
-```text
-pytest
-  → реальный тестовый Order и Transaction в Main Backend
-  → Debezium
-  → штатный producer Main Backend
-  → Kafka payments.order.paid
-  → Finance Module
-  → payment_job и snapshot в БД
-```
-
-Тесты не собирают `order.paid` вручную. Контракт события, `order_id`,
-`order_item_id` и idempotency key формирует Main Backend.
-
-## Безопасность
-
-Создание оплаченного заказа запускает реальные процессы выбранного стенда:
-credit в Blnk, начисление MBonus и последующий split. Внешний smoke запускается
-только при двух явных разрешениях:
+## Happy path
 
 ```text
-FM_ALLOW_SIDE_EFFECTS=true
-FM_CONFIRM_DOWNSTREAM_ISOLATED=true
+Core Backend создаёт реальные тестовые Order, OrderProduct и payment rows
+→ Debezium публикует source event
+→ штатный consumer Core Backend публикует payments.order.paid
+→ Finance Module выполняет CREDIT
+→ тест дожидается CREDITED и проверяет snapshot
+→ QA setup переводит тот же тестовый Core-заказ в DELIVERED
+→ Debezium и штатный handler публикуют orders.order.completed
+→ Finance Module выполняет SPLIT
+→ тест дожидается SPLIT_COMPLETED и проверяет BLNK-транзакции
 ```
 
-Второй флаг можно включать только после подтверждения, что тестовый магазин,
-балансы Blnk и MBonus изолированы от реальных денег и клиентов.
+Для подготовки MBANK-заказа используется реальный клиентский HTTP-флоу Market
+(`src/finance_autotests/market_checkout.py`): логин → корзина → самовывоз →
+`order/prepare` → эмуляция колбэка MBank через служебный вебхук-токен (тот же
+механизм, которым провайдер подтверждает оплату в проде). Это не требует kubectl.
 
-Файл `.env` игнорируется Git. Секреты нельзя сохранять в исходниках,
-fixtures, `.env.example` или логах CI.
+Остальные методы оплаты (MBANK Pay, Payler, MPlus, Adal) пока создаются через
+штатную developer-команду Core Backend `trigger_finmodule_debezium_flows` (kubectl
+exec в Core Backend pod). Она создаёт настоящие тестовые заказы, поэтому после
+обработки они доступны на странице «Заказы» в интерфейсе Finance Module.
+Прямые `INSERT`, `UPDATE`, `DELETE`, `SET` и другие команды к БД из автотестов не
+выполняются.
 
-## Как создаётся заказ
+Перевод MBANK-заказа в `DELIVERED` (второй шаг happy path) делает та же
+`MarketCheckoutFactory` реальным dispatcher-эндпоинтом
+`PATCH /api/crm/dispatcher/v2/orders/{id}/` с `{"status": "DELIVERED"}` — тем же
+API, которым в проде пользуется диспетчер, когда завершает заказ вручную. Для
+входа нужна роль Dispatcher на тестовом клиенте (`FM_TEST_CLIENT_PHONE`). Для
+остальных методов оплаты завершение по-прежнему идёт через kubectl-команду
+(`CoreBackendScenarioFactory.complete()`).
 
-MVP использует существующий в Main Backend builder
-`_FinmoduleDebeziumFlowBuilder` и запускает только flow `mbank-native`.
-Builder создаёт:
+## Тестовый профиль dev
 
-- тестовый Order с `is_test=True`;
-- тестовый Product и OrderProduct;
-- настоящую Transaction;
-- переход Transaction в финальный статус.
+- merchant: `741d63b1-f37e-48c3-b2bb-523ef03faf32`;
+- shop: `273`;
+- все созданные заказы и товары имеют признак `is_test=True`;
+- существующие пользователи и магазин переиспользуются.
 
-После изменения таблицы штатный Debezium-handler Main Backend публикует
-`order.paid`. Использование приватного builder — временное решение. Позже
-в Main Backend следует добавить публичную management-команду с параметрами
-`--flow mbank-native` и `--client-phone`.
+Пользователь выбирается явно через FM_TEST_CLIENT_PHONE=996500122279; магазин проверяется по FM_TEST_MERCHANT_ID.
 
-## Установка
+QA-обёртка вызывает только выбранный метод developer builder. Поэтому одиночный
+smoke создаёт один нужный заказ, а не полный пакет из девяти сценариев. Поддержаны
+MBANK, MBANK Pay, Payler, MPlus и Adal.
+
+На dev 2026-09-09 Payler setup заблокирован рассинхронизацией developer builder и
+схемы БД: обязательный `order_paylertransaction.payment_source` не заполняется.
+Остальные сценарии создаются независимо и не блокируются этой ошибкой.
+
+## Подготовка
 
 ```powershell
-cd C:\QA\FinanceModuleAutotests
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
 Copy-Item .env.example .env
 ```
 
-## Unit-тесты
+Секреты и DSN хранятся только локально. Файл .env автоматически не загружается:
+передайте его значения как переменные окружения процесса/CI. Перед запуском укажите актуальный Core
+Backend pod в `FM_MAIN_BACKEND_RESOURCE`.
 
-Unit-тесты не обращаются к кластеру и не создают финансовые операции:
-
-```powershell
-pytest tests/unit -v
-```
-
-## Локальный E2E Finance Module
-
-Тест работает только с локальным Docker-окружением. Он самостоятельно:
-
-- публикует `merchant.created` и ждёт создания счетов мерчанта в BLNK;
-- публикует `order.paid` и ждёт `CREDITED`;
-- проверяет `payment_job`, snapshot, item и CREDIT-проводку;
-- публикует `order.completed` и ждёт `SPLIT_COMPLETED`.
-
-Бизнес-записи напрямую в PostgreSQL тест не создаёт. База используется в
-read-only режиме только для проверок результата.
-
-```powershell
-cd C:\QA\FinanceModuleAutotests
-$env:FM_LOCAL_E2E = "true"
-.\.venv\Scripts\python.exe -m pytest tests/local -v -s
-```
-
-Значения по умолчанию:
-
-```text
-Kafka:     localhost:9092
-PostgreSQL: postgresql://user:user@localhost:5434/fin_module
-Timeout:   90 секунд
-```
-
-При необходимости их можно изменить переменными
-`FM_LOCAL_KAFKA`, `FM_LOCAL_POSTGRES_DSN`,
-`FM_LOCAL_WAIT_TIMEOUT_SECONDS` и `FM_LOCAL_WAIT_INTERVAL_SECONDS`.
-
-## Внешний smoke
-
-Перед запуском требуется:
-
-- доступ `kubectl` к namespace Main Backend;
-- read-only DSN Finance Module;
-- специально выделенный тестовый магазин;
-- активный тестовый клиент типа `customer`;
-- подтверждённая изоляция Blnk и MBonus.
-
-После заполнения `.env`:
+Побочные эффекты разрешаются только двумя явными флагами:
 
 ```powershell
 $env:FM_ALLOW_SIDE_EFFECTS = "true"
 $env:FM_CONFIRM_DOWNSTREAM_ISOLATED = "true"
-pytest tests/smoke -v
 ```
 
-Smoke создаёт один реальный MBANK-заказ и проверяет:
+Для MBANK-флоу через Market API дополнительно нужны `FM_MARKET_DEV_LOGIN_TOKEN`
+(dev-bypass токен для входа без пароля, `settings.DEVELOPMENT_TOKEN` на Core Backend)
+и `FM_MBANK_WEBHOOK_TOKEN` (служебный токен MBank-вебхука на dev) — оба без значения
+по умолчанию, проверяются при старте.
 
-- соответствие `payment_job` настоящему Order;
-- соответствие payment ID алгоритму producer Main Backend;
-- сохранение snapshot;
-- реальные OrderProduct, Product, Category, Shop и Merchant ID.
+## Запуск
 
-## Текущие ограничения
+Один MBANK happy path:
 
-- Тест нельзя запускать на обычном магазине.
-- Тест пока не выполняет автоматический rollback финансовых операций.
-- Проверка credit, split и возврата будет добавлена после подготовки
-  изолированных downstream-сервисов и тестовых балансов.
+```powershell
+python scripts/run_dev_payments.py --payment MBANK
+pytest tests/functional/payments/test_payment_mbank.py -v -s
+```
+
+Все поддержанные оплаты:
+
+```powershell
+python scripts/run_dev_payments.py --payment ALL
+pytest -m functional -v -s
+```
+
+`--run-id` можно передать вручную для диагностики. Без него каждый запуск получает
+уникальный маркер.
+
+`scripts/run_dev_payments.py` создаёт заказ только через kubectl (для всех методов,
+включая MBANK) и требует рабочего доступа к кластеру.
+`pytest tests/functional/payments/test_payment_mbank.py` полностью не зависит от
+kubectl: и создание заказа, и перевод в `DELIVERED` идут через реальный HTTP Market
+API.
+
+## Границы и защита
+
+MBANK сверяет суммы проводок со snapshot и их общий итог; выбор правильного тарифа и состояние BLNK отдельно ещё не проверяются.
+Первый запуск — только MBANK, вручную, без параллельности и автоматических повторов. Флаги не доказывают изоляцию внешних интеграций.
+
+
+- setup переиспользует developer builder `trigger_finmodule_debezium_flows` и
+  запускает только выбранный flow через Django management shell;
+- после setup заказ хранится в Core Backend как `is_paid=True`, `INITIALIZED`;
+- события оплаты и завершения создаются реальным Debezium/consumer flow;
+- переход в `DELIVERED` выполняется только после подтверждённого `CREDITED` и
+  только для созданного тестом `is_test=True` заказа выбранного магазина;
+- Kafka key обязан совпадать с `payload.order_id`;
+- ошибки `FAILED` завершают тест с содержимым `last_error`;
+- пароли и DSN не выводятся в отчёт;
+- автоматического удаления созданных заказов нет: продуктового safe cleanup API пока нет.
+
+## Только функциональные тесты
+
+Репозиторий содержит только функциональные тесты. Юнит-тесты продуктовой логики
+Finance Module, BLNK и Core Backend ведут разработчики в своих репозиториях;
+юнит-тесты на вспомогательный код этого репозитория не пишутся — его поломку
+выявляют сами функциональные тесты.

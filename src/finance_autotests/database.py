@@ -18,6 +18,7 @@ class FinanceDatabase:
             self._dsn,
             autocommit=True,
             row_factory=dict_row,
+            connect_timeout=5,
         ) as connection:
             yield connection
 
@@ -99,8 +100,8 @@ class FinanceDatabase:
         return self._many(
             """
             SELECT
-                order_item_id, merchant_id, product_id,
-                category_id, item_total
+                order_item_id, merchant_id, shop_id, product_id,
+                category_id, item_total, marketplace_commission_amount, mbonus_amount, merchant_amount
             FROM payment_order_snapshot_items
             WHERE payment_id = %s
             ORDER BY created_at, id
@@ -153,4 +154,4 @@ class FinanceDatabase:
 
     @staticmethod
     def amount(value: Any) -> Decimal:
-        return Decimal(str(value))
+        return Decimal(str(value)).quantize(Decimal("0.01"))

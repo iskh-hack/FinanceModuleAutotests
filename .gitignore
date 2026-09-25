@@ -6,3 +6,6 @@ __pycache__/
 allure-results/
 *.pyc
 *.egg-info/
+
+# Local debug dumps of Market API responses
+/*.json
